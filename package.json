@@ -1,0 +1,29 @@
+{
+  "name": "k4bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bot Discord para anunciar lives, entrar em calls e tocar audio de links do YouTube.",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "register": "tsx src/register-commands.ts"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.28.1",
+    "dotenv": "^16.4.5",
+    "ffmpeg-static": "^5.3.0",
+    "opusscript": "^0.0.8",
+    "play-dl": "^1.9.7",
+    "sharp": "^0.35.5",
+    "youtube-dl-exec": "^3.1.19"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
