@@ -1,20 +1,23 @@
 import { getSettings, saveSettings } from './settings.js';
 import { resolveSpotifyTrack } from './spotify.js';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { Events, PermissionsBitField, type Client, type Message, type ChatInputCommandInteraction } from 'discord.js';
 import { AudioPlayerStatus, StreamType, VoiceConnectionStatus, createAudioPlayer, createAudioResource, entersState, getVoiceConnection, joinVoiceChannel } from '@discordjs/voice';
-import { youtubeDl } from 'youtube-dl-exec';
 import { normalize, selectTrack, searchVariants } from './search.js';
 import { lookup } from './lookup.js';
 import { showPanel } from './panel.js';
 
 type Track = { title: string; url: string; duration?: number; artist?: string; request: Message };
+const require = createRequire(import.meta.url);
+const ytDlpPath = (require('youtube-dl-exec') as { constants: { YOUTUBE_DL_PATH: string } }).constants.YOUTUBE_DL_PATH;
 const aliases = new Map([
   ['p', 'play'], ['s', 'stop'], ['a', 'avancar'], ['skip', 'avancar'],
   ['next', 'avancar'], ['avançar', 'avancar'], ['f', 'fila'], ['q', 'fila'],
   ['h', 'ajuda'], ['help', 'ajuda'], ['c', 'comando'],
 ]);
 export function installPrefix(client: Client) {
-  const sessions = new Map<string, { queue: Track[]; player: ReturnType<typeof createAudioPlayer>; process?: ReturnType<typeof youtubeDl.exec>; generation: number; idleTimer?: ReturnType<typeof setTimeout>; current?: Track; idleSince?: number }>();
+  const sessions = new Map<string, { queue: Track[]; player: ReturnType<typeof createAudioPlayer>; process?: ChildProcess; generation: number; idleTimer?: ReturnType<typeof setTimeout>; current?: Track; idleSince?: number }>();
   function scheduleIdle(guildId: string) {
     const session = sessions.get(guildId);
     if (!session) return;
@@ -86,10 +89,23 @@ export function installPrefix(client: Client) {
           clearTimeout(s.idleTimer);
           s.idleSince = undefined;
           s.current = track;
-          const proc = youtubeDl.exec(track.url, { format: 'bestaudio[acodec=opus][ext=webm]', output: '-', noPlaylist: true, quiet: true }, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+          // Spawn yt-dlp directly for audio: youtube-dl-exec/tinyspawn buffers
+          // every stdout chunk to build its resolved Promise value, even while piping.
+          const proc = spawn(ytDlpPath, ['--format', 'bestaudio[acodec=opus][ext=webm]', '--output', '-', '--no-playlist', '--quiet', '--', track.url], {
+            stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+          });
           s.process = proc;
-          proc.catch(() => { if (s.process === proc && !proc.killed) { void reply('Falha ao obter o áudio. Pulando a faixa.'); s.player.stop(); } });
-          if (!proc.stdout) { proc.kill(); return; }
+          proc.once('error', error => {
+            if (s.process !== proc) return;
+            console.error('Falha ao iniciar yt-dlp:', error.message);
+            void reply('Falha ao obter o áudio. Pulando a faixa.');
+            s.player.stop();
+          });
+          proc.once('close', (code, signal) => {
+            if (s.process !== proc || code === 0) return;
+            console.warn('yt-dlp encerrou a faixa com erro:', { code, signal });
+            s.player.stop();
+          });
           s.player.play(createAudioResource(proc.stdout, { inputType: StreamType.WebmOpus, inlineVolume: true }));
           if ('resource' in s.player.state) s.player.state.resource.volume?.setVolume(getSettings().volume / 100);
           showPanel(client, track.request, s.player, track, () => s.queue, () => { s.generation++; s.queue.length = 0; s.process?.kill(); s.player.stop(); });
@@ -120,6 +136,7 @@ export function installPrefix(client: Client) {
       }
       if (!info?.webpage_url) throw new Error('Não encontrei uma música para essa busca. Tente incluir o artista.');
       if (session.generation !== generation) return;
+      if (session.queue.length >= 50) throw new Error('A fila chegou ao limite de 50 músicas. Aguarde ou remova algumas faixas.');
       const permissions = channel.permissionsFor(message.guild.members.me!);
       if (!permissions?.has([PermissionsBitField.Flags.Connect, PermissionsBitField.Flags.Speak])) throw new Error('Preciso das permissões Conectar e Falar nessa call.');
       const voice = connection ?? joinVoiceChannel({ guildId: message.guild.id, channelId: channel.id, adapterCreator: message.guild.voiceAdapterCreator, daveEncryption: true });

@@ -211,7 +211,8 @@ export function showPanel(client: Client, request: Message, player: AudioPlayer,
     } catch { /* An expired interaction must not crash playback. */ }
   };
   client.on(Events.InteractionCreate, listener);
-  const timer = setInterval(() => void update(), 1000);
+  // Progress is text based, so refresh every 5s to reduce Discord edits and CPU.
+  const timer = setInterval(() => void update(), 5000);
   timer.unref();
   function dispose() {
     clearInterval(timer);
@@ -221,6 +222,8 @@ export function showPanel(client: Client, request: Message, player: AudioPlayer,
   player.once(AudioPlayerStatus.Idle, () => {
     closed = true;
     removeAfter = Date.now() + 2000;
+    const cleanup = setTimeout(() => void update(), 2000);
+    cleanup.unref();
   });
   const previous = messages.get(key);
   const creation = (async () => {

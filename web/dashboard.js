@@ -63,5 +63,5 @@ $('settings').onsubmit = async event => {
   catch(error) { $('feedback').textContent = error.message; }
   finally { busy=false; await refresh(); }
 };
-async function poll() { await refresh(); setTimeout(poll,1500); }
+async function poll() { await refresh(); setTimeout(poll,3000); }
 poll();

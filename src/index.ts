@@ -24,6 +24,7 @@ const handleMusicCommand = installPrefix(client);
 installPanelCleanup(client, env.guildId);
 startWebsite(client, handleMusicCommand);
 const connections = new Map<string, VoiceConnection>();
+const observedConnections = new WeakSet<VoiceConnection>();
 
 function getVoiceChannel(interaction: ChatInputCommandInteraction) {
   const channel = interaction.guild?.voiceStates.cache.get(interaction.user.id)?.channel;
@@ -60,11 +61,14 @@ async function connect(interaction: ChatInputCommandInteraction) {
     selfMute: false,
     daveEncryption: true,
   });
-  connection.on('stateChange', (oldState, newState) => {
-    console.log(`Voz: ${oldState.status} -> ${newState.status}`);
-    if ('closeCode' in newState) console.log(`Código de encerramento de voz: ${newState.closeCode}`);
-  });
-  connection.on('error', error => console.error('Falha de voz:', error.message));
+  if (!observedConnections.has(connection)) {
+    observedConnections.add(connection);
+    connection.on('stateChange', (oldState, newState) => {
+      console.log(`Voz: ${oldState.status} -> ${newState.status}`);
+      if ('closeCode' in newState) console.log(`Código de encerramento de voz: ${newState.closeCode}`);
+    });
+    connection.on('error', error => console.error('Falha de voz:', error.message));
+  }
   connections.set(interaction.guild.id, connection);
   try {
     await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
