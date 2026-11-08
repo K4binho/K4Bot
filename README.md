@@ -33,3 +33,9 @@ A página em `web/` apresenta o Kubinho.Js e os perfis públicos de K4binho. Ini
 `abrir-pagina.bat` abre o endereço. `BIOGRAFIA.txt` contém a descrição para colar no Developer Portal. O conteúdo de `web/` também pode ser hospedado como site estático.
 
 GitHub: https://github.com/K4binho · LinkedIn: https://linkedin.com/in/mheinrique/ · Mais links: https://beacons.ai/m_heinrique
+
+## Dashboard local
+
+No header da página, **Dashboard** abre `http://k4binho.js/dashboard`. O painel precisa do bot em execução e conectado ao Discord. Mostra o servidor, canal, faixa atual, progresso e fila. Permite pausar, continuar, pular, parar, sair da call, limpar a fila e remover faixas.
+
+Em Configurações, salve volume (0–150%), tempo de inatividade (1–60 minutos) e exclusão dos pedidos aceitos. Preferências ficam em `.local/settings.json`, ignorado pelo Git. Os controles usam a mesma sessão dos comandos `/` e `!`. A página pública no portfólio apresenta o projeto e oferece um link para o dashboard deste computador.

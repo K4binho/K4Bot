@@ -1,3 +1,4 @@
+import { getSettings, saveSettings } from './settings.js';
 import { resolveSpotifyTrack } from './spotify.js';
 import { Events, PermissionsBitField, type Client, type Message, type ChatInputCommandInteraction } from 'discord.js';
 import { AudioPlayerStatus, StreamType, VoiceConnectionStatus, createAudioPlayer, createAudioResource, entersState, getVoiceConnection, joinVoiceChannel } from '@discordjs/voice';
@@ -13,7 +14,19 @@ const aliases = new Map([
   ['h', 'ajuda'], ['help', 'ajuda'], ['c', 'comando'],
 ]);
 export function installPrefix(client: Client) {
-  const sessions = new Map<string, { queue: Track[]; player: ReturnType<typeof createAudioPlayer>; process?: ReturnType<typeof youtubeDl.exec>; generation: number; idleTimer?: ReturnType<typeof setTimeout> }>();
+  const sessions = new Map<string, { queue: Track[]; player: ReturnType<typeof createAudioPlayer>; process?: ReturnType<typeof youtubeDl.exec>; generation: number; idleTimer?: ReturnType<typeof setTimeout>; current?: Track; idleSince?: number }>();
+  function scheduleIdle(guildId: string) {
+    const session = sessions.get(guildId);
+    if (!session) return;
+    clearTimeout(session.idleTimer);
+    session.idleSince ??= Date.now();
+    session.idleTimer = setTimeout(() => {
+      if (session.queue.length || session.player.state.status !== AudioPlayerStatus.Idle) return;
+      getVoiceConnection(guildId)?.destroy();
+      sessions.delete(guildId);
+    }, Math.max(1, session.idleSince + getSettings().idleMinutes * 60000 - Date.now()));
+    session.idleTimer.unref();
+  }
   const handleMessage = async (message: Message) => {
     if (message.author.bot || !message.guild) return;
     const match = /^!k4(\S*)\s*(.*)$/i.exec(message.content.trim());
@@ -66,22 +79,19 @@ export function installPrefix(client: Client) {
         const next = () => {
           const track = s.queue.shift();
           if (!track) {
-            clearTimeout(s.idleTimer);
-            s.idleTimer = setTimeout(() => {
-              if (s.queue.length || s.player.state.status !== AudioPlayerStatus.Idle) return;
-              const idleConnection = getVoiceConnection(message.guild!.id);
-              if (idleConnection && idleConnection.state.status !== 'destroyed') idleConnection.destroy();
-              sessions.delete(message.guild!.id);
-            }, 3 * 60 * 1000);
-            s.idleTimer.unref();
+            s.current = undefined;
+            scheduleIdle(message.guild!.id);
             return;
           }
           clearTimeout(s.idleTimer);
+          s.idleSince = undefined;
+          s.current = track;
           const proc = youtubeDl.exec(track.url, { format: 'bestaudio[acodec=opus][ext=webm]', output: '-', noPlaylist: true, quiet: true }, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
           s.process = proc;
           proc.catch(() => { if (s.process === proc && !proc.killed) { void reply('Falha ao obter o áudio. Pulando a faixa.'); s.player.stop(); } });
           if (!proc.stdout) { proc.kill(); return; }
-          s.player.play(createAudioResource(proc.stdout, { inputType: StreamType.WebmOpus }));
+          s.player.play(createAudioResource(proc.stdout, { inputType: StreamType.WebmOpus, inlineVolume: true }));
+          if ('resource' in s.player.state) s.player.state.resource.volume?.setVolume(getSettings().volume / 100);
           showPanel(client, track.request, s.player, track, () => s.queue, () => { s.generation++; s.queue.length = 0; s.process?.kill(); s.player.stop(); });
         };
         s.player.on(AudioPlayerStatus.Idle, () => { s.process?.kill(); s.process = undefined; next(); });
@@ -90,7 +100,7 @@ export function installPrefix(client: Client) {
         (s as typeof s & { next: () => void }).next = next;
       }
       if (command === 'fila') { await reply(session.queue.map((t, i) => `${i + 1}. ${t.title}`).join('\n').slice(0, 1900) || 'Fila vazia.'); return; }
-      if (command === 'stop') { clearTimeout(session.idleTimer); session.generation++; session.queue.length = 0; session.process?.kill(); session.player.stop(); await reply('⏹️ Reprodução parada e fila limpa.'); return; }
+      if (command === 'stop') { clearTimeout(session.idleTimer); session.generation++; session.queue.length = 0; session.process?.kill(); session.player.stop(); if (session.player.state.status === AudioPlayerStatus.Idle) scheduleIdle(message.guild.id); await reply('⏹️ Reprodução parada e fila limpa.'); return; }
       if (command === 'avancar') { session.process?.kill(); session.player.stop(); await reply('⏭️ Avançando para a próxima faixa disponível.'); return; }
       const generation = session.generation;
       const text = match[2].trim().replace(/^<|>$/g, '');
@@ -120,7 +130,7 @@ export function installPrefix(client: Client) {
       session.queue.push({ title: info.title, url: info.webpage_url, duration: info.duration, artist: info.artist || (info.channel || info.uploader ? `Canal: ${info.channel || info.uploader}` : undefined), request: message });
       if (session.player.state.status === AudioPlayerStatus.Idle) (session as typeof session & { next: () => void }).next();
       try {
-        await message.delete();
+        if (getSettings().deleteCommands || message.interactionMetadata) await message.delete();
       } catch (error) {
         const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
         if (code === 10008) return; // O pedido já foi apagado.
@@ -142,6 +152,7 @@ export function installPrefix(client: Client) {
     // Both entry points invoke the same handler and its single session map.
     const request = {
       id: interaction.id,
+      interactionMetadata: { id: interaction.id },
       author: interaction.user,
       guild: interaction.guild,
       guildId: interaction.guildId,
@@ -156,14 +167,54 @@ export function installPrefix(client: Client) {
     } as unknown as Message;
     await handleMessage(request);
   };
+  function stop(guildId: string) {
+    const session = sessions.get(guildId);
+    if (!session) return;
+    session.generation++;
+    session.queue.length = 0;
+    session.process?.kill();
+    session.player.stop();
+    session.current = undefined;
+    if (session.player.state.status === AudioPlayerStatus.Idle) scheduleIdle(guildId);
+  }
   return Object.assign(handleSlash, {
-    stop: (guildId: string) => {
+    stop,
+    snapshot: () => ({
+      ready: client.isReady(), settings: getSettings(),
+      guilds: [...client.guilds.cache.values()].map(guild => {
+        const session = sessions.get(guild.id);
+        const channelId = getVoiceConnection(guild.id)?.joinConfig.channelId;
+        const resource = session && 'resource' in session.player.state ? session.player.state.resource : undefined;
+        const summarize = (track: Track) => ({ title: track.title, url: track.url, artist: track.artist, duration: track.duration });
+        return { id: guild.id, name: guild.name, channel: channelId ? guild.channels.cache.get(channelId)?.name : null,
+          state: session?.player.state.status ?? 'idle', elapsed: resource ? resource.playbackDuration / 1000 : 0,
+          current: session?.current ? summarize(session.current) : null, queue: session?.queue.map(summarize) ?? [] };
+      }),
+    }),
+    configure: (input: unknown) => {
+      const next = saveSettings(input);
+      for (const [id, session] of sessions) {
+        if ('resource' in session.player.state) session.player.state.resource.volume?.setVolume(next.volume / 100);
+        if (session.idleSince) scheduleIdle(id);
+      }
+      return next;
+    },
+    control: (guildId: string, action: string, index?: number) => {
+      if (!client.guilds.cache.has(guildId)) throw new Error('Servidor não encontrado.');
       const session = sessions.get(guildId);
-      if (!session) return;
-      session.generation++;
-      session.queue.length = 0;
-      session.process?.kill();
-      session.player.stop();
+      if (action === 'disconnect') { stop(guildId); getVoiceConnection(guildId)?.destroy(); return; }
+      if (!session) throw new Error('Nenhuma sessão ativa neste servidor.');
+      if (action === 'stop') { stop(guildId); return; }
+      if (action === 'clear') { session.queue.length = 0; return; }
+      if (action === 'remove') {
+        if (!Number.isInteger(index) || index! < 0 || index! >= session.queue.length) throw new Error('Faixa não encontrada na fila.');
+        session.queue.splice(index!, 1); return;
+      }
+      if (!session.current) throw new Error('Nenhuma música ativa.');
+      if (action === 'pause') { session.player.pause(); return; }
+      if (action === 'resume') { session.player.unpause(); return; }
+      if (action === 'skip') { session.process?.kill(); session.player.stop(); return; }
+      throw new Error('Ação inválida.');
     },
   });
 }

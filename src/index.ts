@@ -22,7 +22,7 @@ import { installPanelCleanup } from './panel.js';
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const handleMusicCommand = installPrefix(client);
 installPanelCleanup(client, env.guildId);
-startWebsite(client);
+startWebsite(client, handleMusicCommand);
 const connections = new Map<string, VoiceConnection>();
 
 function getVoiceChannel(interaction: ChatInputCommandInteraction) {
