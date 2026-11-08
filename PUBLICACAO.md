@@ -14,4 +14,4 @@ Node.js 24. Copie `.env.example` para `.env` e preencha suas credenciais. Ative 
 - `!K4f`: fila.
 - `!K4help`: ajuda.
 
-Spotify automático, AutoPlay, favoritos, repetição e dashboard ainda não estão disponíveis. Fila e estado ficam em memória. A captura mostra o bot real antes do último redesign; o player atual usa uma imagem dinâmica. As edições estão sujeitas aos limites do Discord. Use conteúdo autorizado.
+Links de faixas do Spotify são resolvidos para versões correspondentes no YouTube. AutoPlay, favoritos e repetição ainda não estão disponíveis. A página local apresenta o projeto e os comandos. Fila e estado ficam em memória. A captura mostra o bot real antes do último redesign; o player atual usa uma imagem dinâmica. Os comandos /play e !K4p compartilham a fila e o player. O bot sai da call após três minutos com o player parado e a fila vazia. As edições estão sujeitas aos limites do Discord. Use conteúdo autorizado.

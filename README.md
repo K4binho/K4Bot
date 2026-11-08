@@ -25,3 +25,11 @@ Bot Discord para anunciar lives, entrar em canal de voz e tocar o áudio de víd
 ## Limitação do vídeo
 
 Bots oficiais do Discord não podem transmitir vídeo/tela para uma call como um usuário comum. Por isso, o MVP reproduz o áudio do YouTube. A transmissão de vídeo exigiria uma arquitetura separada, como OBS ou outro emissor autorizado, e não deve usar automação de conta de usuário/self-bot.
+
+## Página local e criador
+
+A página em `web/` apresenta o Kubinho.Js e os perfis públicos de K4binho. Inicia junto com o bot, em `http://127.0.0.1`, acessível apenas neste PC. Para usar `http://k4binho.js`, execute `configurar-endereco.ps1` uma vez como administrador. O servidor usa a porta HTTP padrão 80, sem porta visível na URL. Se a porta já estiver ocupada, o bot continua e o terminal informa o conflito. Para iniciar só a página, use `npm run build` e `npm run web`.
+
+`abrir-pagina.bat` abre o endereço. `BIOGRAFIA.txt` contém a descrição para colar no Developer Portal. O conteúdo de `web/` também pode ser hospedado como site estático.
+
+GitHub: https://github.com/K4binho · LinkedIn: https://linkedin.com/in/mheinrique/ · Mais links: https://beacons.ai/m_heinrique

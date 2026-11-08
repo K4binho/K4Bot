@@ -1,3 +1,4 @@
+import { startWebsite } from './website.js';
 import 'dotenv/config';
 import {
   Client,
@@ -8,38 +9,21 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import {
-  AudioPlayerStatus,
-  StreamType,
   VoiceConnectionStatus,
-  createAudioPlayer,
-  createAudioResource,
   entersState,
   joinVoiceChannel,
   getVoiceConnection,
-  type AudioPlayer,
   type VoiceConnection,
 } from '@discordjs/voice';
-import { youtubeDl } from 'youtube-dl-exec';
 import { env } from './env.js';
 import { installPrefix } from './prefix.js';
+import { installPanelCleanup } from './panel.js';
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
-installPrefix(client);
+const handleMusicCommand = installPrefix(client);
+installPanelCleanup(client, env.guildId);
+startWebsite(client);
 const connections = new Map<string, VoiceConnection>();
-const players = new Map<string, AudioPlayer>();
-const audioProcesses = new Map<string, { kill: () => void }>();
-
-function normalizeYouTubeUrl(input: string) {
-  const url = new URL(input.trim());
-  if (url.hostname === 'youtu.be') {
-    return `https://www.youtube.com/watch?v=${url.pathname.slice(1)}`;
-  }
-  if (url.hostname.endsWith('youtube.com') && url.pathname === '/watch') {
-    const videoId = url.searchParams.get('v');
-    if (videoId) return `https://www.youtube.com/watch?v=${videoId}`;
-  }
-  return input.trim();
-}
 
 function getVoiceChannel(interaction: ChatInputCommandInteraction) {
   const channel = interaction.guild?.voiceStates.cache.get(interaction.user.id)?.channel;
@@ -68,7 +52,7 @@ async function connect(interaction: ChatInputCommandInteraction) {
     return null;
   }
 
-  const connection = joinVoiceChannel({
+  const connection = getVoiceConnection(interaction.guild.id) ?? joinVoiceChannel({
     channelId: channel.id,
     guildId: interaction.guild.id,
     adapterCreator: interaction.guild.voiceAdapterCreator,
@@ -114,73 +98,18 @@ async function handleCommand(interaction: ChatInputCommandInteraction) {
     }
   }
 
-  if (interaction.commandName === 'play') {
-    const url = normalizeYouTubeUrl(interaction.options.getString('url', true));
-    await interaction.deferReply();
-    try {
-      const connection = connections.get(guildId) ?? await connect(interaction);
-      if (!connection) return;
-      await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
-      const info = await youtubeDl(url, {
-        dumpSingleJson: true,
-        skipDownload: true,
-        quiet: true,
-        noWarnings: true,
-      }) as { title?: string };
-      audioProcesses.get(guildId)?.kill();
-      const streamProcess = youtubeDl.exec(
-        url,
-        {
-          format: 'bestaudio[ext=webm]/bestaudio',
-          output: '-',
-          quiet: true,
-          noWarnings: true,
-        },
-        { stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-      if (!streamProcess.stdout) throw new Error('O extrator não abriu o fluxo de áudio.');
-      let loggedAudioData = false;
-      streamProcess.stdout.on('data', (chunk: Buffer) => {
-        if (!loggedAudioData) {
-          loggedAudioData = true;
-          console.log(`Fluxo de áudio recebido: ${chunk.length} bytes.`);
-        }
-      });
-      audioProcesses.set(guildId, streamProcess);
-      const player = players.get(guildId) ?? createAudioPlayer();
-      player.on('error', (error) => console.error('Erro no player de áudio:', error.message));
-      player.on(AudioPlayerStatus.Playing, () => console.log(`Áudio reproduzindo no servidor ${guildId}.`));
-      player.on(AudioPlayerStatus.Idle, () => console.log(`Áudio finalizado no servidor ${guildId}.`));
-      const resource = createAudioResource(streamProcess.stdout, {
-        inputType: StreamType.WebmOpus,
-      });
-      connection.subscribe(player);
-      player.play(resource);
-      players.set(guildId, player);
-      return interaction.editReply(`▶️ Tocando: **${info.title ?? 'áudio'}**`);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === 'ABORT_ERR') return interaction.editReply('A conexão de voz não ficou pronta; o áudio não foi iniciado.');
-      console.error(error);
-      return interaction.editReply('Não consegui tocar esse link. Use uma URL pública de vídeo do YouTube.');
-    }
-  }
-
-  if (interaction.commandName === 'stop') {
-    players.get(guildId)?.stop();
-    audioProcesses.get(guildId)?.kill();
-    audioProcesses.delete(guildId);
-    return interaction.reply('⏹️ Áudio parado.');
+  if (['play', 'stop', 'skip', 'avancar', 'fila', 'help'].includes(interaction.commandName)) {
+    return handleMusicCommand(interaction);
   }
 
   if (interaction.commandName === 'leave') {
+    // Stop the shared queue before disconnecting.
+    handleMusicCommand.stop(guildId);
     await interaction.deferReply();
-    players.get(guildId)?.stop();
-    audioProcesses.get(guildId)?.kill();
+
     const connection = getVoiceConnection(guildId) ?? connections.get(guildId);
     if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) connection.destroy();
     connections.delete(guildId);
-    players.delete(guildId);
-    audioProcesses.delete(guildId);
     const guild = interaction.guild!;
     // A restarted process can have no local connection while still appearing in voice.
     guild.shard.send({ op: 4, d: { guild_id: guildId, channel_id: null, self_mute: false, self_deaf: false } });

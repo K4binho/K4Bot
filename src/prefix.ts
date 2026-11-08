@@ -1,7 +1,8 @@
-import { Events, PermissionsBitField, type Client, type Message } from 'discord.js';
+import { resolveSpotifyTrack } from './spotify.js';
+import { Events, PermissionsBitField, type Client, type Message, type ChatInputCommandInteraction } from 'discord.js';
 import { AudioPlayerStatus, StreamType, VoiceConnectionStatus, createAudioPlayer, createAudioResource, entersState, getVoiceConnection, joinVoiceChannel } from '@discordjs/voice';
 import { youtubeDl } from 'youtube-dl-exec';
-import { normalize, selectTrack } from './search.js';
+import { normalize, selectTrack, searchVariants } from './search.js';
 import { lookup } from './lookup.js';
 import { showPanel } from './panel.js';
 
@@ -12,14 +13,18 @@ const aliases = new Map([
   ['h', 'ajuda'], ['help', 'ajuda'], ['c', 'comando'],
 ]);
 export function installPrefix(client: Client) {
-  const sessions = new Map<string, { queue: Track[]; player: ReturnType<typeof createAudioPlayer>; process?: ReturnType<typeof youtubeDl.exec>; generation: number }>();
-  client.on(Events.MessageCreate, async (message: Message) => {
+  const sessions = new Map<string, { queue: Track[]; player: ReturnType<typeof createAudioPlayer>; process?: ReturnType<typeof youtubeDl.exec>; generation: number; idleTimer?: ReturnType<typeof setTimeout> }>();
+  const handleMessage = async (message: Message) => {
     if (message.author.bot || !message.guild) return;
     const match = /^!k4(\S*)\s*(.*)$/i.exec(message.content.trim());
     if (!match) return;
     const name = match[1].toLowerCase();
     const command = aliases.get(name) ?? name;
-    const reply = (content: string) => message.reply({ content, allowedMentions: { parse: [], repliedUser: false } });
+    const reply = async (content: string) => {
+      if (!client.channels.cache.has(message.channelId)) return;
+      try { await message.reply({ content, allowedMentions: { parse: [], repliedUser: false } }); }
+      catch (error) { console.warn('Resposta indisponível:', (error as {code?: unknown}).code); }
+    };
     if (command === 'comando' || command === 'ajuda') {
       await reply([
         '**🎵 Kubinho.Js — Lista de comandos**',
@@ -44,7 +49,7 @@ export function installPrefix(client: Client) {
         'Entre em uma call e envie o comando no chat. Se já houver uma música tocando, a nova entra na fila.',
         'Inclua o artista para melhorar a busca. Pequenos erros e diferenças de acento são tolerados, mas o resultado pode variar.',
         'Maiúsculas e minúsculas funcionam igualmente. Para controlar a reprodução, fique na mesma call do bot.',
-        'Spotify: reprodução por link ainda não disponível; use nome + artista ou um link do YouTube.',
+        'Spotify: envie o link de uma faixa para buscar a versão correspondente no YouTube.',
       ].join('\n')); return;
     }
     if (!['play', 'stop', 'avancar', 'fila'].includes(command)) return;
@@ -60,13 +65,24 @@ export function installPrefix(client: Client) {
         const s = session;
         const next = () => {
           const track = s.queue.shift();
-          if (!track) return;
+          if (!track) {
+            clearTimeout(s.idleTimer);
+            s.idleTimer = setTimeout(() => {
+              if (s.queue.length || s.player.state.status !== AudioPlayerStatus.Idle) return;
+              const idleConnection = getVoiceConnection(message.guild!.id);
+              if (idleConnection && idleConnection.state.status !== 'destroyed') idleConnection.destroy();
+              sessions.delete(message.guild!.id);
+            }, 3 * 60 * 1000);
+            s.idleTimer.unref();
+            return;
+          }
+          clearTimeout(s.idleTimer);
           const proc = youtubeDl.exec(track.url, { format: 'bestaudio[acodec=opus][ext=webm]', output: '-', noPlaylist: true, quiet: true }, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
           s.process = proc;
           proc.catch(() => { if (s.process === proc && !proc.killed) { void reply('Falha ao obter o áudio. Pulando a faixa.'); s.player.stop(); } });
           if (!proc.stdout) { proc.kill(); return; }
           s.player.play(createAudioResource(proc.stdout, { inputType: StreamType.WebmOpus }));
-          showPanel(client, track.request, s.player, track, () => s.queue.length, () => { s.generation++; s.queue.length = 0; s.process?.kill(); s.player.stop(); });
+          showPanel(client, track.request, s.player, track, () => s.queue, () => { s.generation++; s.queue.length = 0; s.process?.kill(); s.player.stop(); });
         };
         s.player.on(AudioPlayerStatus.Idle, () => { s.process?.kill(); s.process = undefined; next(); });
         s.player.on('error', () => { void reply('Falha na reprodução.'); s.player.stop(); });
@@ -74,35 +90,23 @@ export function installPrefix(client: Client) {
         (s as typeof s & { next: () => void }).next = next;
       }
       if (command === 'fila') { await reply(session.queue.map((t, i) => `${i + 1}. ${t.title}`).join('\n').slice(0, 1900) || 'Fila vazia.'); return; }
-      if (command === 'stop') { session.generation++; session.queue.length = 0; session.process?.kill(); session.player.stop(); await reply('⏹️ Reprodução parada e fila limpa.'); return; }
+      if (command === 'stop') { clearTimeout(session.idleTimer); session.generation++; session.queue.length = 0; session.process?.kill(); session.player.stop(); await reply('⏹️ Reprodução parada e fila limpa.'); return; }
       if (command === 'avancar') { session.process?.kill(); session.player.stop(); await reply('⏭️ Avançando para a próxima faixa disponível.'); return; }
       const generation = session.generation;
       const text = match[2].trim().replace(/^<|>$/g, '');
       if (!text) throw new Error('Informe o nome ou link. Exemplo: !K4play rap do minecraft');
       const input = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? new URL(text) : null;
-      const query = input ? input.href : `ytsearch5:${normalize(text)}`;
-      if (input?.hostname === 'open.spotify.com') {
-        const id = /\/track\/([a-zA-Z0-9]+)/.exec(input.pathname)?.[1];
-        if (!id) throw new Error('Por enquanto, envie um link de faixa individual do Spotify.');
-        const response = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(`https://open.spotify.com/track/${id}`)}`, { signal: AbortSignal.timeout(10000) });
-        if (!response.ok) throw new Error('Não consegui ler essa faixa do Spotify.');
-        const data = await response.json() as { title?: string };
-        if (!data.title) throw new Error('Spotify não informou o título da faixa.');
-        // oEmbed does not reliably provide artist/duration: require confirmation instead of guessing.
-        throw new Error(`Faixa Spotify: ${data.title}. Para evitar tocar uma versão errada, envie o link correspondente do YouTube. A correspondência automática ainda não está disponível.`);
-      }
-      if (input && (!['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'].includes(input.hostname) || input.protocol !== 'https:')) throw new Error('Use um link HTTPS do YouTube ou de uma faixa do Spotify.');
-      await reply('Preparando a faixa…');
-      const result = await lookup(query);
+      if (input?.protocol === 'http:') input.protocol = 'https:';
+      const query = input ? input.href : `ytsearch15:${normalize(text)}`;
+      if (input && (!['open.spotify.com', 'youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'].includes(input.hostname) || input.protocol !== 'https:')) throw new Error('Use um link HTTPS do YouTube ou de uma faixa do Spotify.');
+      if (message.channel.isSendable()) void message.channel.sendTyping().catch(() => {});
+      const result = input?.hostname === 'open.spotify.com' ? await resolveSpotifyTrack(input) : await lookup(query);
       let info = input ? result : selectTrack(text, result.entries ?? []);
       if (!input && !info) {
-        const fallback = await lookup(`ytsearch5:${normalize(text)} song`);
-        info = selectTrack(text, fallback.entries ?? []);
-        if (!info && normalize(text).split(' ').length >= 3) {
-          const broader = normalize(text).split(' ').slice(0, -1).join(' ');
-          const candidates = await lookup(`ytsearch10:${broader}`);
-          info = selectTrack(text, candidates.entries ?? []);
-        }
+        const alternatives = await Promise.allSettled(searchVariants(text).map(async variant =>
+          (await lookup(`ytsearch10:${variant}`)).entries ?? []));
+        const entries = [...(result.entries ?? []), ...alternatives.flatMap(result => result.status === 'fulfilled' ? result.value : [])];
+        info = selectTrack(text, entries);
       }
       if (!info?.webpage_url) throw new Error('Não encontrei uma música para essa busca. Tente incluir o artista.');
       if (session.generation !== generation) return;
@@ -112,9 +116,54 @@ export function installPrefix(client: Client) {
       await entersState(voice, VoiceConnectionStatus.Ready, 20000);
       if (session.generation !== generation) return;
       voice.subscribe(session.player);
+      clearTimeout(session.idleTimer);
       session.queue.push({ title: info.title, url: info.webpage_url, duration: info.duration, artist: info.artist || (info.channel || info.uploader ? `Canal: ${info.channel || info.uploader}` : undefined), request: message });
       if (session.player.state.status === AudioPlayerStatus.Idle) (session as typeof session & { next: () => void }).next();
-      else await reply(`Adicionada à fila: ${info.title}`);
+      try {
+        await message.delete();
+      } catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+        if (code === 10008) return; // O pedido já foi apagado.
+        console.warn('Falha ao apagar pedido aceito', { canal: message.channelId, mensagem: message.id, code });
+        if ((code === 50013 || code === 50001) && message.channel.isSendable()) {
+          const notice = await message.channel.send('Pedido aceito. Para apagar o comando, preciso da permissão **Gerenciar mensagens** neste canal de texto.');
+          setTimeout(() => void notice.delete().catch(() => {}), 12000).unref();
+        }
+      }
     } catch (error) { await reply(error instanceof Error ? error.message : 'Não consegui executar o comando.'); }
+  };
+  client.on(Events.MessageCreate, handleMessage);
+  const handleSlash = async (interaction: ChatInputCommandInteraction) => {
+    if (!interaction.inCachedGuild() || !interaction.channel?.isSendable()) return;
+    await interaction.deferReply({ flags: 64 });
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+    const command = interaction.commandName === 'skip' ? 'avancar' : interaction.commandName === 'help' ? 'ajuda' : interaction.commandName;
+    const input = interaction.commandName === 'play' ? interaction.options.getString('url', true) : '';
+    // Both entry points invoke the same handler and its single session map.
+    const request = {
+      id: interaction.id,
+      author: interaction.user,
+      guild: interaction.guild,
+      guildId: interaction.guildId,
+      channel: interaction.channel,
+      channelId: interaction.channelId,
+      member,
+      content: `!k4${command} ${input}`,
+      reply: async (payload: {content: string}) => {
+        await interaction.editReply({ content: payload.content, allowedMentions: { parse: [] } });
+      },
+      delete: async () => { await interaction.deleteReply(); },
+    } as unknown as Message;
+    await handleMessage(request);
+  };
+  return Object.assign(handleSlash, {
+    stop: (guildId: string) => {
+      const session = sessions.get(guildId);
+      if (!session) return;
+      session.generation++;
+      session.queue.length = 0;
+      session.process?.kill();
+      session.player.stop();
+    },
   });
 }
